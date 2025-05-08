@@ -201,6 +201,50 @@ class muMLPTab9(nn.Module):
                 {'params': self.fc_2.parameters(), 'lr': learning_rate/self.width**0.5},
                 {'params': self.fc_3.parameters(), 'lr': learning_rate/self.width}
             ]
+        
+class customMLP(nn.Module):
+    """muP initialized MLP model, according to Table9 from TP5 (thanks to dvruette)"""
+    def __init__(self, width=128, num_classes=10):
+        super().__init__()
+        self.width = width
+        self.input_mult = self.width**0.5
+        self.output_mult = self.width**-0.5
+        self.fc_1 = nn.Linear(3072, width, bias=False)
+        self.fc_2 = nn.Linear(width, width, bias=False)
+        self.fc_3 = nn.Linear(width, num_classes, bias=False)
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        nn.init.normal_(self.fc_1.weight, std=self.width**-0.5) # ? 1/fanout
+        nn.init.normal_(self.fc_2.weight, std=self.width**-0.5)
+        nn.init.normal_(self.fc_3.weight, std=self.width**-0.5)
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)
+        h = self.input_mult * self.fc_1(x)
+        h = self.fc_2(F.relu(h))
+        h = self.output_mult * self.fc_3(F.relu(h))
+        return h
+
+    def get_parameter_groups(self, learning_rate, optimizer):
+        '''
+        SGD specific muP learning rates (Table 9, TP5)
+        *IMPORTANT* SGD in muP just takes the LR that you pass
+        This is only here for implementation completeness
+        '''
+        if optimizer == SGD:
+            return [
+                {'params': self.fc_1.parameters(), 'lr': learning_rate},
+                {'params': self.fc_2.parameters(), 'lr': learning_rate},
+                {'params': self.fc_3.parameters(), 'lr': learning_rate}
+            ]
+        elif optimizer == Adam:
+            '''Adam specific muP learning rates (Table 9, TP5)'''
+            return [
+                {'params': self.fc_1.parameters(), 'lr': learning_rate/self.width**0.5},
+                {'params': self.fc_2.parameters(), 'lr': learning_rate/self.width**0.5},
+                {'params': self.fc_3.parameters(), 'lr': learning_rate/self.width}
+            ]
 
 def train(model, train_dl, optimizer, num_epochs, device):
     model.train()
