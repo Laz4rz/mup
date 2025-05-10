@@ -77,12 +77,12 @@ def get_available_gpus(min_free_mem_gb=4, max_utilization=10):
     return available_gpus
 
 
-def preload_subset(batch_size, subset_percentage):
+def preload_subset(batch_size, subset_percentage, return_dataset=False):
     transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-    train_ds = datasets.CIFAR10(root=data_dir, train=True, download=True, transform=transform)
+    train_ds = datasets.CIFAR10(root='/tmp', train=True, download=True, transform=transform)
 
     torch.manual_seed(0)
     np.random.seed(0)
@@ -93,6 +93,9 @@ def preload_subset(batch_size, subset_percentage):
     ys = torch.tensor([train_subset[i][1] for i in range(len(train_subset))])
     preloaded_dataset = torch.utils.data.TensorDataset(xs, ys)
     preloaded = torch.utils.data.DataLoader(preloaded_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    if return_dataset:
+        return preloaded, preloaded_dataset
+
     return preloaded
 
 class SP_MLP(nn.Module):
@@ -115,6 +118,27 @@ class SP_MLP(nn.Module):
         h = F.relu(self.fc_1(x))
         h = F.relu(self.fc_2(h))
         return self.fc_3(h)
+    
+class NTK_MLP(nn.Module):
+    """Initialized according to Table1 from TP4"""
+    def __init__(self, width=128, num_classes=10):
+        super().__init__()
+        self.width = width
+        self.fc_1 = nn.Linear(3072, width, bias=False)
+        self.fc_2 = nn.Linear(width,  width,  bias=False)
+        self.fc_3 = nn.Linear(width,  num_classes, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.normal_(self.fc_1.weight, std=self.width**(0))
+        nn.init.normal_(self.fc_2.weight, std=self.width**(0))
+        nn.init.normal_(self.fc_3.weight, std=self.width**(0))
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)
+        h = F.relu(self.fc_1(x))
+        h = F.relu(self.fc_2(h) * self.width**(-0.5))
+        return self.fc_3(h) * self.width**(-0.5)
 
 class demoMLP(nn.Module):
     """SP model from the muP demo example jupyternotebook -- doesnt show expected train behavior"""
