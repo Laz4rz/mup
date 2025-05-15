@@ -5,6 +5,7 @@ import itertools
 import numpy as np
 import torch.nn.functional as F
 from torchvision import datasets, transforms
+from torch.utils.data import TensorDataset, DataLoader
 import torch
 from torch import nn
 from torch.optim import SGD, Adam
@@ -13,6 +14,7 @@ import pandas as pd
 from tqdm import tqdm
 import argparse
 import torch.multiprocessing as mp
+
 
 def chunk_jobs(jobs, n_chunks):
     """Split a list of jobs into n_chunks as evenly as possible, tagging each job with a unique index."""
@@ -76,6 +78,124 @@ def get_available_gpus(min_free_mem_gb=4, max_utilization=10):
 
     return available_gpus
 
+class SAM(torch.optim.Optimizer):
+    r"""Implements Sharpness-Aware Minimisation (Foret et al., 2021).
+
+       Usage:
+           base = torch.optim.SGD
+           optimizer = SAM(model.parameters(), base, lr=0.1, momentum=0.9, rho=0.05)
+    """
+
+    def __init__(self, params, base_optimizer, rho=0.05, **base_kwargs):
+        if not isinstance(base_optimizer, torch.optim.Optimizer):
+            self.base_optimizer = base_optimizer(params, **base_kwargs)
+        else:  # already instantiated
+            self.base_optimizer = base_optimizer
+        defaults = dict(rho=rho, **self.base_optimizer.defaults)
+        super().__init__(self.base_optimizer.param_groups, defaults)
+        self.rho = rho
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        # ‖g‖₂
+        grad_norm = torch.norm(
+            torch.stack(
+                [
+                    p.grad.norm(p=2)
+                    for group in self.param_groups
+                    for p in group["params"]
+                    if p.grad is not None
+                ]
+            )
+        )
+        scale = self.rho / (grad_norm + 1e-12)
+
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                e_w = p.grad * scale.to(p)              # ascent direction
+                self.state[p]["e_w"] = e_w
+                p.add_(e_w)                              # w ← w + ε
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                p.sub_(self.state[p]["e_w"])            # w ← w − ε  (back to centre)
+        self.base_optimizer.step()                      # plain optimiser step
+        if zero_grad:
+            self.zero_grad()
+
+    def step(self, *args, **kwargs):
+        raise RuntimeError("Call first_step and second_step instead")
+
+    def zero_grad(self):
+        self.base_optimizer.zero_grad()
+
+def get_cifar(batch_size=128, num_classes=10, subset=1.0, MSE=False, on_gpu=False, device=None, download=False):
+    assert 10 >= num_classes, f"Number of classes {np.unique(targets[indices]).shape[0]} != {num_classes}"
+    
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    
+    train_ds = datasets.CIFAR10(root='/tmp', train=True, download=download, transform=transform)
+    targets = np.array(train_ds.targets)
+    mask = np.isin(targets, np.arange(num_classes))
+
+    if subset < 1.0:
+        indices = []
+        samples_per_class = int(5000 * subset)
+        for i in range(num_classes):
+            class_indices = np.where(targets == i)[0]
+            selected_indices = np.random.choice(class_indices, samples_per_class, replace=False)
+            indices.extend(selected_indices)
+    else:
+        indices = np.where(mask)[0]
+
+    X, y = [], []
+    for i in tqdm(indices):
+        x, y_ = train_ds[i]
+        X.append(x)
+        y.append(y_)
+    X = torch.stack(X)
+    y = torch.tensor(y)
+
+    if MSE:
+        y = F.one_hot(y, num_classes=num_classes).float()
+
+    if on_gpu:
+        assert device is not None, "Please provide a device="
+        X = X.to(device)
+        y = y.to(device)
+
+    tensor_ds = TensorDataset(X, y)
+    train_dl = DataLoader(tensor_ds, batch_size=batch_size, shuffle=True, pin_memory=not on_gpu)
+
+    if on_gpu:
+        print(f"Estimated size of the dataset in MB: {(X.numel() * X.element_size() + y.numel() * y.element_size()) / 1024 / 1024:.2f}")
+
+    return train_dl, tensor_ds
+
+def get_cifar_toy(device, validation=False):
+    torch.set_default_dtype(torch.float64)
+    full = datasets.CIFAR10(".", train=True, download=True, transform=transforms.ToTensor())
+    if not validation:
+        idx0 = [i for i,t in enumerate(full.targets) if t == 0][:25]   # airplane → +1
+        idx1 = [i for i,t in enumerate(full.targets) if t == 6][:25]   # frog     → –1
+    else:
+        idx0 = [i for i,t in enumerate(full.targets) if t == 0][25:50]   # airplane → +1
+        idx1 = [i for i,t in enumerate(full.targets) if t == 6][25:50]   # frog     → –1
+    x = torch.stack([full[i][0] for i in idx0+idx1]).to(device)
+    y = torch.tensor([ 1.] * 25 + [-1.] * 25, device=device).unsqueeze(1)
+    loader = itertools.cycle([(x, y)])
+    return loader
 
 def preload_subset(batch_size, subset_percentage, return_dataset=False):
     transform = transforms.Compose([
@@ -108,16 +228,119 @@ class SP_MLP(nn.Module):
         self.fc_3 = nn.Linear(width,  num_classes, bias=False)
         self.reset_parameters()
 
+    def get_name(self):
+        return "sp"
+
     def reset_parameters(self):
-        nn.init.normal_(self.fc_1.weight, std=1.0)
-        nn.init.normal_(self.fc_2.weight, std=self.width**(-0.5))
+        nn.init.normal_(self.fc_1.weight, std=1.0*2/np.sqrt(3072))
+        nn.init.normal_(self.fc_2.weight, std=self.width**(-0.5)*2)
         nn.init.normal_(self.fc_3.weight, std=self.width**(-0.5))
 
-    def forward(self, x):
+    def forward(self, x, record_activations=False):
+        if record_activations:
+            activations = []
+            x = x.view(x.size(0), -1)
+            h = F.relu(self.fc_1(x))
+            activations.append(h)
+            h = F.relu(self.fc_2(h))
+            activations.append(h)
+            h = self.fc_3(h)
+            activations.append(h)
+            return h, activations
+        
         x = x.view(x.size(0), -1)
         h = F.relu(self.fc_1(x))
         h = F.relu(self.fc_2(h))
         return self.fc_3(h)
+    
+
+class muMLPTab9(nn.Module):
+    """muP initialized MLP model, according to Table9 from TP5 (thanks to dvruette)"""
+    def __init__(self, width=128, num_classes=10, multiplier=True):
+        super().__init__()
+        self.width = width
+        self.input_mult = self.width**0.5 if multiplier else 1.0
+        self.output_mult = self.width**-0.5 if multiplier else 1.0
+        self.fc_1 = nn.Linear(3072, width, bias=False)
+        self.fc_2 = nn.Linear(width, width, bias=False)
+        self.fc_3 = nn.Linear(width, num_classes, bias=False)
+        if not multiplier:
+            self.layer_scales = [self.width, 1, 1/self.width]
+        else:
+            self.layer_scales = [1] * 3
+        self.multiplier = multiplier
+        self.reset_parameters()
+
+    def get_name(self):
+        return "mup"
+    
+    def reset_parameters(self):
+        if self.multiplier:
+            nn.init.normal_(self.fc_1.weight, std=self.width**-0.5*1/np.sqrt(3072)) # ? 1/fanout 
+            # nn.init.normal_(self.fc_1.weight, std=self.width**-0.5)
+            nn.init.normal_(self.fc_2.weight, std=self.width**-0.5)
+            nn.init.normal_(self.fc_3.weight, std=self.width**-0.5)
+        else:
+            # nn.init.normal_(self.fc_1.weight, std=1.0)
+            nn.init.normal_(self.fc_1.weight, std=1.0/np.sqrt(3072))
+            nn.init.normal_(self.fc_2.weight, std=self.width**(-0.5))
+            nn.init.normal_(self.fc_3.weight, std=1/self.width)
+
+    def forward(self, x, record_activations=False):
+        if record_activations:
+            activations = []
+            x = x.view(x.size(0), -1)
+            h = self.input_mult * self.fc_1(x)
+            activations.append(h)
+            h = self.fc_2(F.relu(h))
+            activations.append(h)
+            h = self.output_mult * self.fc_3(F.relu(h))
+            activations.append(h)
+            return h, activations
+        
+        x = x.view(x.size(0), -1)
+        h = self.input_mult * self.fc_1(x)
+        h = self.fc_2(F.relu(h))
+        h = self.output_mult * self.fc_3(F.relu(h))
+        return h
+    
+    def get_parameter_groups(self, learning_rate, optimizer):
+        '''
+        SGD specific muP learning rates (Table 9, TP5)
+        '''
+        if optimizer == "SGD" or optimizer == SGD:
+            # self.layer_lrs = [learning_rate * layer_scale for layer_scale in self.layer_scales]
+            # return [
+            #     {'params': self.fc_1.parameters(), 'lr': self.layer_lrs[0]},
+            #     {'params': self.fc_2.parameters(), 'lr': self.layer_lrs[1]},
+            #     {'params': self.fc_3.parameters(), 'lr': self.layer_lrs[2]}
+            # ]
+            self.layer_lrs = [learning_rate * layer_scale for layer_scale in self.layer_scales]
+            if self.multiplier:
+                return [
+                    {'params': self.fc_1.parameters(), 'lr': self.layer_lrs[0]},
+                    {'params': self.fc_2.parameters(), 'lr': self.layer_lrs[1]},
+                    {'params': self.fc_3.parameters(), 'lr': self.layer_lrs[2]}
+                ]
+            else:
+                return [
+                    {'params': self.fc_1.parameters(), 'lr': self.layer_lrs[0]},
+                    {'params': self.fc_2.parameters(), 'lr': self.layer_lrs[1]},
+                    {'params': self.fc_3.parameters(), 'lr': self.layer_lrs[2]}
+                ]
+
+        elif optimizer == Adam or optimizer == "Adam":
+            '''Adam specific muP learning rates (Table 9, TP5)'''
+            self.layer_lrs = [learning_rate * layer_scale for layer_scale in self.layer_scales]
+            self.layer_lrs[0] = learning_rate * self.layer_scales[0] / self.width**0.5
+            self.layer_lrs[1] = learning_rate * self.layer_scales[1] / self.width**0.5
+            self.layer_lrs[2] = learning_rate * self.layer_scales[2] / self.width
+            return [
+                {'params': self.fc_1.parameters(), 'lr': self.layer_lrs[0]},
+                {'params': self.fc_2.parameters(), 'lr': self.layer_lrs[1]},
+                {'params': self.fc_3.parameters(), 'lr': self.layer_lrs[2]}
+            ]
+
     
 class NTK_MLP(nn.Module):
     """Initialized according to Table1 from TP4"""
@@ -129,12 +352,25 @@ class NTK_MLP(nn.Module):
         self.fc_3 = nn.Linear(width,  num_classes, bias=False)
         self.reset_parameters()
 
+    def get_name(self):
+        return "ntp"
+
     def reset_parameters(self):
         nn.init.normal_(self.fc_1.weight, std=self.width**(0))
         nn.init.normal_(self.fc_2.weight, std=self.width**(0))
         nn.init.normal_(self.fc_3.weight, std=self.width**(0))
 
-    def forward(self, x):
+    def forward(self, x, record_activations=False):
+        if record_activations:
+            activations = []
+            x = x.view(x.size(0), -1)
+            h = F.relu(self.fc_1(x))
+            activations.append(h)
+            h = F.relu(self.fc_2(h))
+            activations.append(h)
+            h = self.fc_3(h)
+            activations.append(h)
+            return h, activations
         x = x.view(x.size(0), -1)
         h = F.relu(self.fc_1(x))
         h = F.relu(self.fc_2(h) * self.width**(-0.5))
@@ -181,50 +417,6 @@ class MLP(nn.Module):
         h = F.relu(h)
         h = self.fc_3(h)
         return h
-    
-class muMLPTab9(nn.Module):
-    """muP initialized MLP model, according to Table9 from TP5 (thanks to dvruette)"""
-    def __init__(self, width=128, num_classes=10):
-        super().__init__()
-        self.width = width
-        self.input_mult = self.width**0.5
-        self.output_mult = self.width**-0.5
-        self.fc_1 = nn.Linear(3072, width, bias=False)
-        self.fc_2 = nn.Linear(width, width, bias=False)
-        self.fc_3 = nn.Linear(width, num_classes, bias=False)
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        nn.init.normal_(self.fc_1.weight, std=self.width**-0.5) # ? 1/fanout
-        nn.init.normal_(self.fc_2.weight, std=self.width**-0.5)
-        nn.init.normal_(self.fc_3.weight, std=self.width**-0.5)
-
-    def forward(self, x):
-        x = x.view(x.size(0), -1)
-        h = self.input_mult * self.fc_1(x)
-        h = self.fc_2(F.relu(h))
-        h = self.output_mult * self.fc_3(F.relu(h))
-        return h
-
-    def get_parameter_groups(self, learning_rate, optimizer):
-        '''
-        SGD specific muP learning rates (Table 9, TP5)
-        *IMPORTANT* SGD in muP just takes the LR that you pass
-        This is only here for implementation completeness
-        '''
-        if optimizer == SGD:
-            return [
-                {'params': self.fc_1.parameters(), 'lr': learning_rate},
-                {'params': self.fc_2.parameters(), 'lr': learning_rate},
-                {'params': self.fc_3.parameters(), 'lr': learning_rate}
-            ]
-        elif optimizer == Adam:
-            '''Adam specific muP learning rates (Table 9, TP5)'''
-            return [
-                {'params': self.fc_1.parameters(), 'lr': learning_rate/self.width**0.5},
-                {'params': self.fc_2.parameters(), 'lr': learning_rate/self.width**0.5},
-                {'params': self.fc_3.parameters(), 'lr': learning_rate/self.width}
-            ]
         
 class customMLP(nn.Module):
     """muP initialized MLP model, according to Table9 from TP5 (thanks to dvruette)"""
