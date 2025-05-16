@@ -107,7 +107,10 @@ def train_toy_cifar(model, width, criterion, lr, epochs, device, seed, sam, sam_
     else:
         optimizer = torch.optim.SGD(model.get_parameter_groups(lr, "SGD"), lr=lr, momentum=0, weight_decay=0)
 
-    df = pd.DataFrame(columns=pd.MultiIndex.from_tuples([("losses", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho), ("lambdas", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho)]))
+    if validation:
+        df = pd.DataFrame(columns=pd.MultiIndex.from_tuples([("losses", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho), ("val", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho)]))
+    else:
+        df = pd.DataFrame(columns=pd.MultiIndex.from_tuples([("losses", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho), ("lambdas", model_name, 2, 0.005, criterion, lr, width, multiplier, sam, sam_rho)]))
 
     for epoch in range(epochs):
         xb, yb = next(iter(train_dl))
@@ -127,14 +130,14 @@ def train_toy_cifar(model, width, criterion, lr, epochs, device, seed, sam, sam_
             else:
                 hess = hessian(model, criterion=criterion, data=(sharp_x, sharp_y), cuda=True, base_lr=lr, layer_lrs=model.layer_lrs)
             top_eigenvalue = hess.eigenvalues(maxIter=400, top_n=1)[0][0]
-            print(f"{model_name}: Epoch {epoch}, Top Eigenvalue: {top_eigenvalue:.5f}, Loss: {loss.item():.5f}, lr: {lr}, width: {width}, sam: {sam}, sam_rho: {sam_rho}, multiplier: {multiplier}")
+            print(f"{model_name}: Epoch {epoch}, Top Eigenvalue: {top_eigenvalue:.5f}, Loss: {loss.item():.5f}, lr: {lr}, width: {width}, sam: {sam}, sam_rho: {sam_rho}, multiplier: {multiplier}, device: {device}")
             df.loc[epoch] = [loss.item(), top_eigenvalue]
         elif not validation:
             df.loc[epoch] = [loss.item(), -2137.0]
         if validation:
             xb_val, yb_val = next(iter(val_dl))
             val_loss = criterion(model(xb_val), yb_val)
-            df.loc[epoch] = [val_loss.item(), -2137.0]
+            df.loc[epoch] = [loss.item(), val_loss.item()]
 
     if validation:
         df.to_csv(f"/home/Mikolaj/mup-repo/results_multi/{model_name}_{criterion}_2_0.005_{epochs}_{width}_{lr}_toy_{sam}_{sam_rho}_{multiplier}_val.csv", index=False)

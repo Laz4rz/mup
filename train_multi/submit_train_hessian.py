@@ -24,9 +24,10 @@ training_script = PATH+"train_multi/train_hessian_multiplier.py"
 # models = ["mup", "ntp"]
 models = ["mup"]
 # models = ["sp"]
-device = 7
+device = 2
 num_epochs = 5000
 widths = [64, 128, 256, 512, 1024, 2048, 4096]
+# widths = [64, 1024, 4096]
 # widths = [256]
 # lrs = [0.008, 0.01, 0.015, 0.03]
 # lrs = [0.001, 0.0025, 0.005, 0.0075, 0.01]
@@ -45,11 +46,13 @@ sam = True
 
 # for rho dependence plot:
 # sam_rhos = [0.0001, 0.00066, 0.0033]
-sam_rhos = [0.0001, 0.0025]
-lrs = [0.005]
+# sam_rhos = [0.0001, 0.0015]
+# sam_rhos = [0.0001, 0.0015, 0.003]
+sam_rhos = [0.001]
+lrs = [0.0025, 0.005, 0.0075]
 
-# lrs = np.linspace(0.0003, 0.01, 15)
-# sam_rhos = np.linspace(0.0003, 0.01, 15)
+# lrs = np.linspace(0.001, 0.01, 12)
+# sam_rhos = np.linspace(0.001, 0.01, 12)
 multiplier = True
 hessian_iter = 10
 validation = False
