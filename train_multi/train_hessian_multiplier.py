@@ -130,7 +130,7 @@ def train_toy_cifar(model, width, criterion, lr, epochs, device, seed, sam, sam_
             else:
                 hess = hessian(model, criterion=criterion, data=(sharp_x, sharp_y), cuda=True, base_lr=lr, layer_lrs=model.layer_lrs)
             top_eigenvalue = hess.eigenvalues(maxIter=400, top_n=1)[0][0]
-            print(f"{model_name}: Epoch {epoch}, Top Eigenvalue: {top_eigenvalue:.5f}, Loss: {loss.item():.5f}, lr: {lr}, width: {width}, sam: {sam}, sam_rho: {sam_rho}, multiplier: {multiplier}, device: {device}")
+            print(f"{model_name}: Epoch {epoch}, Top Eigenvalue: {top_eigenvalue:.5f}, Loss: {loss.item():.5f}, lr: {lr}, width: {width}, sam: {sam}, sam_rho: {sam_rho}, multiplier: {multiplier}, device: {device}, seed: {seed}")
             df.loc[epoch] = [loss.item(), top_eigenvalue]
         elif not validation:
             df.loc[epoch] = [loss.item(), -2137.0]
@@ -142,7 +142,7 @@ def train_toy_cifar(model, width, criterion, lr, epochs, device, seed, sam, sam_
     if validation:
         df.to_csv(f"/home/Mikolaj/mup-repo/results_multi/{model_name}_{criterion}_2_0.005_{epochs}_{width}_{lr}_toy_{sam}_{sam_rho}_{multiplier}_val.csv", index=False)
     else:
-        df.to_csv(f"/home/Mikolaj/mup-repo/results_multi/{model_name}_{criterion}_2_0.005_{epochs}_{width}_{lr}_toy_{sam}_{sam_rho}_{multiplier}.csv", index=False)
+        df.to_csv(f"/home/Mikolaj/mup-repo/results_multi/{model_name}_{criterion}_2_0.005_{epochs}_{width}_{lr}_toy_{sam}_{sam_rho}_{multiplier}_{seed}.csv", index=False)
 
 
 if __name__ == "__main__":

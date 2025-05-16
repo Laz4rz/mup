@@ -24,11 +24,11 @@ training_script = PATH+"train_multi/train_hessian_multiplier.py"
 # models = ["mup", "ntp"]
 models = ["mup"]
 # models = ["sp"]
-device = 2
+device = 0
 num_epochs = 5000
-widths = [64, 128, 256, 512, 1024, 2048, 4096]
+# widths = [64, 128, 256, 512, 1024, 2048, 4096]
 # widths = [64, 1024, 4096]
-# widths = [256]
+widths = [4096]
 # lrs = [0.008, 0.01, 0.015, 0.03]
 # lrs = [0.001, 0.0025, 0.005, 0.0075, 0.01]
 lrs = [0.0025, 0.005, 0.0075]
@@ -48,14 +48,19 @@ sam = True
 # sam_rhos = [0.0001, 0.00066, 0.0033]
 # sam_rhos = [0.0001, 0.0015]
 # sam_rhos = [0.0001, 0.0015, 0.003]
+
 sam_rhos = [0.001]
 lrs = [0.0025, 0.005, 0.0075]
+# sam_rhos = [0.0, 0.0001, 0.0015]
+# lrs = [0.005]
 
 # lrs = np.linspace(0.001, 0.01, 12)
 # sam_rhos = np.linspace(0.001, 0.01, 12)
 multiplier = True
 hessian_iter = 10
 validation = False
+
+seed = 2
 
 if __name__ == '__main__':
     start_time = time.time()
@@ -69,7 +74,7 @@ if __name__ == '__main__':
             "bash", "-c",
             f"/opt/common/envs/mup-abc/bin/python {training_script} "
             f"--model {model} --width {width} --lr {lr} --device {device} "
-            f"--epochs {num_epochs} --subset {subset} --toy_cifar {toy_cifar} "
+            f"--epochs {num_epochs} --subset {subset} --toy_cifar {toy_cifar} --seed {seed} "
             f"--sam {sam} --sam_rho {sam_rho} --multiplier {multiplier} --hessian_iter {hessian_iter} --validation {validation}"
         ]
 
